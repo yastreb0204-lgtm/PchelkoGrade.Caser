@@ -1475,7 +1475,7 @@ const CONTEST_LEVELS=[
 {id:3,name:'Золото',prizeMin:1800,prizeMax:2600,cost:900}
 ];
 const LS_KEY='pchelko_online_v1',LS_SESSION='pchelko_online_session';
-let db=null,firebaseReady=false,user=null,mode='login',selectedFrom=[],selectedTo=null,currentCase=null,spinning=false,lbMetric='balance';
+let db=null,firebaseReady=false,user=null,mode='login',selectedFrom=[],selectedTo=null,currentCase=null,caseSpinning=false,upgradeSpinning=false,lbMetric='balance';
 let presenceRef=null,globalBoostUntil=0,lastBannerId='',swarmActive=false,swarmEarned=0,swarmMinute=0,swarmTimer=null,swarmInterval=null;
 let memCards=[],memFlipped=[],memMatched=0,memMoves=0,memLock=false;
 let contestLevel=1,contestJoined=false,contestEnd=0,localParticipants=[],openQty=1,passConfirmOk=false;
@@ -1540,7 +1540,20 @@ function normalizeNick(n){return String(n||'').trim().toLowerCase()}
 function initFirebase(){try{if(!FIREBASE_CONFIG.apiKey||FIREBASE_CONFIG.apiKey.includes('Dummy')){firebaseReady=false;return false}firebase.initializeApp(FIREBASE_CONFIG);db=firebase.database();firebaseReady=true;return true}catch(e){firebaseReady=false;return false}}
 function loadLocalUsers(){try{return JSON.parse(localStorage.getItem(LS_KEY)||'{}')}catch(e){return{}}}
 function saveLocalUsers(all){localStorage.setItem(LS_KEY,JSON.stringify(all))}
-function saveUserLocal(){if(!user)return;var all=loadLocalUsers();all[normalizeNick(user.nick)]=user;saveLocalUsers(all);localStorage.setItem(LS_SESSION,normalizeNick(user.nick))}
+function saveUserLocal(){
+  if(!user)return false;
+  try{
+    var all=loadLocalUsers();
+    all[normalizeNick(user.nick)]=user;
+    saveLocalUsers(all);
+    localStorage.setItem(LS_SESSION,normalizeNick(user.nick));
+    return true;
+  }catch(err){
+    console.error('saveUserLocal failed:',err);
+    try{toast('Не удалось сохранить данные на этом устройстве','err')}catch(_){}
+    return false;
+  }
+}
 function ensureUserFields(u){if(typeof u.balance!=='number')u.balance=100;if(typeof u.cells!=='number')u.cells=0;if(typeof u.neon!=='number')u.neon=0;if(!Array.isArray(u.inventory))u.inventory=[];if(!Array.isArray(u.discovered))u.discovered=[];if(typeof u.codexClaimed!=='boolean')u.codexClaimed=false;if(typeof u.lastClaim!=='number')u.lastClaim=0;if(!u.boosts)u.boosts={x2:0,x3:0};if(!u.contestLevels)u.contestLevels={1:true,2:false,3:false};if(typeof u.prestige!=='number')u.prestige=0;if(typeof u.honeyMult!=='number')u.honeyMult=1;if(typeof u.dailyStreak!=='number')u.dailyStreak=0;if(typeof u.dailyLast!=='string')u.dailyLast='';if(typeof u.workLevel!=='number')u.workLevel=1;if(typeof u.xp!=='number')u.xp=0;if(!Array.isArray(u.history))u.history=[];
 if(typeof u.bpLevel!=='number')u.bpLevel=1;if(typeof u.bpXp!=='number')u.bpXp=0;if(typeof u.bpClaimed!=='number')u.bpClaimed=0;
 if(typeof u.bpPigXp!=='number')u.bpPigXp=0;if(typeof u.bpPigCases!=='number')u.bpPigCases=0;
@@ -1549,77 +1562,125 @@ if(!Array.isArray(u.skins))u.skins=['default'];if(!u.skin)u.skin='default';if(ty
 return u}
 function toast(msg,type){type=type||'ok';var t=document.getElementById('toast');t.textContent=msg;t.className='toast show '+type;setTimeout(()=>t.classList.remove('show'),2600)}
 function updateBalance(){document.getElementById('balance').textContent=fmt(user.balance);document.getElementById('cells').textContent=fmt(user.cells);document.getElementById('neon').textContent=fmt(user.neon);var tk=document.getElementById('tickets');if(tk)tk.textContent=fmt(user.tickets||0);updateBoostsBar();syncPublicProfile();updateContestUI()}
-var globalEvent=null;
-function getLuckMult(){var now=Date.now(),mult=1;if(user&&user.boosts){if(user.boosts.x3>now)mult=Math.max(mult,3);if(user.boosts.x2>now)mult=Math.max(mult,2)}if(globalBoostUntil>now)mult=Math.max(mult,2);if(globalEvent&&globalEvent.until>now&&String(globalEvent.type).indexOf('luck')===0)mult=Math.max(mult,Number(globalEvent.mult)||1);return mult}
+var globalEvent={};
+var GLOBAL_EVENT_SPECS={
+  luck2:{cost:100,mult:2,label:'Удача X2',short:'🌍 Удача X2',cls:'global'},
+  luck3:{cost:300,mult:3,label:'Удача X3',short:'💜 Удача X3',cls:'x3'},
+  luck5:{cost:720,mult:5,label:'Удача X5',short:'⚡ Удача X5',cls:'x3'},
+  gold:{cost:480,mult:1,label:'Золотой ивент',short:'🥇 Золотой',cls:'x2'},
+  rainbow:{cost:1600,mult:1,label:'Радужный ивент',short:'🌈 Радужный',cls:'global'}
+};
+function getActiveGlobalEvents(now){
+  now=now||Date.now();
+  var source=globalEvent||{},all=[];
+  // Старый формат (один объект) и новый формат (дочерние записи по типам).
+  if(source.type&&source.until)all.push(source);
+  Object.keys(source).forEach(function(k){
+    var ev=source[k];
+    if(ev&&typeof ev==='object'&&ev.type&&ev.until)all.push(ev);
+  });
+  var byType={};
+  all.forEach(function(ev){
+    if(ev.until>now&&GLOBAL_EVENT_SPECS[ev.type]&&(!byType[ev.type]||ev.until>byType[ev.type].until))byType[ev.type]=ev;
+  });
+  return Object.keys(byType).map(function(k){return byType[k]});
+}
+function getLuckMult(){
+  var now=Date.now(),mult=1;
+  if(user&&user.boosts){
+    if(user.boosts.x3>now)mult=Math.max(mult,3);
+    if(user.boosts.x2>now)mult=Math.max(mult,2);
+  }
+  if(globalBoostUntil>now)mult=Math.max(mult,2);
+  getActiveGlobalEvents(now).forEach(function(ev){
+    if(String(ev.type).indexOf('luck')===0)mult=Math.max(mult,Number(ev.mult)||GLOBAL_EVENT_SPECS[ev.type].mult||1);
+  });
+  return mult;
+}
 function updateBoostsBar(){
   var bar=document.getElementById('boosts-bar'),now=Date.now(),parts=[];
   if(!bar||!user)return;
-  // личные бусты
   if(user.boosts&&user.boosts.x3>now){var s=Math.ceil((user.boosts.x3-now)/1000);parts.push('<span class="boost-pill x3">Личный X3 · '+Math.floor(s/60)+':'+String(s%60).padStart(2,'0')+'</span>')}
   if(user.boosts&&user.boosts.x2>now){var s2=Math.ceil((user.boosts.x2-now)/1000);parts.push('<span class="boost-pill x2">Личный X2 · '+Math.floor(s2/60)+':'+String(s2%60).padStart(2,'0')+'</span>')}
   if(globalBoostUntil>now){var sg=Math.ceil((globalBoostUntil-now)/1000);parts.push('<span class="boost-pill global">🌐 Глоб. X2 · '+Math.floor(sg/60)+':'+String(sg%60).padStart(2,'0')+'</span>')}
-  // глобальный ивент: luck2/3/5, gold, rainbow
-  if(globalEvent&&globalEvent.until>now){
-    var left=Math.ceil((globalEvent.until-now)/1000);
-    var meta={
-      luck2:{label:'🌍 Удача X2',cls:'global'},
-      luck3:{label:'💜 Удача X3',cls:'x3'},
-      luck5:{label:'⚡ Удача X5',cls:'x3'},
-      gold:{label:'🥇 Золотой',cls:'x2'},
-      rainbow:{label:'🌈 Радужный',cls:'global'}
-    }[globalEvent.type]||{label:'🌍 Ивент',cls:'global'};
-    var who=globalEvent.nick?(' · '+globalEvent.nick):'';
-    parts.push('<span class="boost-pill '+meta.cls+'">'+meta.label+' · '+Math.floor(left/60)+':'+String(left%60).padStart(2,'0')+who+'</span>');
-  }
+  var active=getActiveGlobalEvents(now);
+  active.forEach(function(ev){
+    var spec=GLOBAL_EVENT_SPECS[ev.type];if(!spec)return;
+    var left=Math.ceil((ev.until-now)/1000);
+    var who=ev.nick?(' · '+ev.nick):'';
+    parts.push('<span class="boost-pill '+spec.cls+'">'+spec.short+' · '+Math.floor(left/60)+':'+String(left%60).padStart(2,'0')+who+'</span>');
+  });
   if(parts.length){bar.innerHTML=parts.join('');bar.classList.add('show')}
   else{bar.innerHTML='';bar.classList.remove('show')}
   var st=document.getElementById('global-event-status');
   if(st){
-    if(!globalEvent||globalEvent.until<=now)st.textContent='Сейчас глобальных ивентов нет.';
-    else{
-      var left2=Math.max(0,Math.ceil((globalEvent.until-now)/1000));
-      var lab={luck2:'Удача X2',luck3:'Удача X3',luck5:'Удача X5',gold:'Золотой',rainbow:'Радужный'}[globalEvent.type]||'Ивент';
-      st.innerHTML='<b style="color:var(--gold)">'+lab+'</b> · '+Math.floor(left2/60)+':'+String(left2%60).padStart(2,'0')+' · запустил <b>'+(globalEvent.nick||'—')+'</b>';
-    }
+    if(!active.length)st.textContent='Сейчас глобальных ивентов нет.';
+    else st.innerHTML=active.map(function(ev){
+      var spec=GLOBAL_EVENT_SPECS[ev.type];var left=Math.max(0,Math.ceil((ev.until-now)/1000));
+      return '<div><b style="color:var(--gold)">'+spec.label+'</b> · '+Math.floor(left/60)+':'+String(left%60).padStart(2,'0')+' · запустил <b>'+(ev.nick||'—')+'</b></div>';
+    }).join('');
   }
 }
 function launchGlobalEvent(type){
- var specs={luck2:{cost:100,mult:2,label:'Удача X2'},luck3:{cost:300,mult:3,label:'Удача X3'},luck5:{cost:720,mult:5,label:'Удача X5'},gold:{cost:480,mult:1,label:'Золотой ивент'},rainbow:{cost:1600,mult:1,label:'Радужный ивент'}};
- var spec=specs[type];if(!spec||!user)return;
- if((user.workLevel||1)<3){toast('Нужен 3 уровень работы','err');playSound('fail');return}
- if((user.neon||0)<spec.cost){toast('Нужно '+spec.cost+' 🏰','err');playSound('fail');return}
- user.neon-=spec.cost;saveUserLocal();updateBalance();
- var addMs=4*60*1000; // 4 минуты
- function buildPayload(cur){
-  var base=Date.now();
-  if(cur&&cur.until>Date.now()&&cur.type===type){
-    return {type:type,mult:spec.mult,until:cur.until+addMs,nick:user.nick,id:uid(),stacked:true};
+  var spec=GLOBAL_EVENT_SPECS[type];if(!spec||!user)return;
+  if((user.workLevel||1)<3){toast('Нужен 3 уровень работы','err');playSound('fail');return}
+  if((user.neon||0)<spec.cost){toast('Нужно '+spec.cost+' 🏰','err');playSound('fail');return}
+  var previousNeon=user.neon||0;
+  user.neon=previousNeon-spec.cost;
+  saveUserLocal();updateBalance();
+  var addMs=4*60*1000;
+  function buildPayload(cur){
+    var now=Date.now();
+    if(cur&&cur.until>now){
+      return {type:type,mult:spec.mult,until:cur.until+addMs,nick:user.nick,id:uid(),stacked:true};
+    }
+    return {type:type,mult:spec.mult,until:now+addMs,nick:user.nick,id:uid()};
   }
-  if(cur&&cur.until>Date.now()&&cur.type!==type){
-    return; // abort different event
+  function onSuccess(val){
+    var mins=val&&val.until?Math.max(1,Math.round((val.until-Date.now())/60000)):4;
+    pushEvent('<b>'+user.nick+'</b> запустил <b>'+spec.label+'</b> · '+mins+' мин');
+    if(typeof showGlobalBanner==='function')showGlobalBanner(user.nick+' запустил '+spec.label+(val&&val.stacked?' · продление':''));
+    toast(spec.label+(val&&val.stacked?' продлён · '+mins+' мин':' · 4 мин')+'!');
+    updateBoostsBar();
   }
-  return {type:type,mult:spec.mult,until:base+addMs,nick:user.nick,id:uid()};
- }
- if(firebaseReady){
-  db.ref('global/event').transaction(function(cur){return buildPayload(cur);},function(err,committed,snap){
-   if(err||!committed){user.neon+=spec.cost;saveUserLocal();updateBalance();toast(err?'Ошибка':'Сейчас другой ивент','err');return}
-   var val=snap&&snap.val&&snap.val();
-   var mins=val&&val.until?Math.max(1,Math.round((val.until-Date.now())/60000)):4;
-   pushEvent('<b>'+user.nick+'</b> запустил <b>'+spec.label+'</b> · '+mins+' мин');
-   if(typeof showGlobalBanner==='function') showGlobalBanner(user.nick+' купил '+spec.label+(val&&val.stacked?' · продление':''));
-   toast(spec.label+(val&&val.stacked?' продлён · '+mins+' мин':' · 4 мин')+'!');
-  });
- }else{
-  var cur=globalEvent;
-  if(cur&&cur.until>Date.now()&&cur.type!==type){user.neon+=spec.cost;saveUserLocal();updateBalance();toast('Сейчас другой ивент','err');return}
-  globalEvent=buildPayload(cur)||{type:type,mult:spec.mult,until:Date.now()+addMs,nick:user.nick,id:uid()};
-  updateBoostsBar();
-  if(typeof showGlobalBanner==='function') showGlobalBanner(user.nick+' купил '+spec.label);
-  toast(spec.label+' · 4 мин (локально)');
- }
+  function onFailure(err){
+    user.neon=(user.neon||0)+spec.cost;saveUserLocal();updateBalance();
+    toast(err?'Ошибка запуска ивента':'Не удалось запустить ивент','err');
+  }
+  if(firebaseReady){
+    try{
+      db.ref('global/event/'+type).transaction(function(cur){return buildPayload(cur);},function(err,committed,snap){
+        if(err||!committed){onFailure(err);return}
+        onSuccess(snap&&snap.val?snap.val():null);
+      });
+    }catch(err){onFailure(err)}
+  }else{
+    var cur=globalEvent&&globalEvent[type];
+    if(!cur&&globalEvent&&globalEvent.type===type)cur=globalEvent;
+    globalEvent=globalEvent||{};
+    globalEvent[type]=buildPayload(cur);
+    onSuccess(globalEvent[type]);
+  }
 }
-function listenGlobalEvent(){if(!firebaseReady)return;db.ref('global/event').on('value',function(snap){globalEvent=snap.val()||null;updateBoostsBar();if(globalEvent&&globalEvent.until>Date.now()&&globalEvent.id&&globalEvent.id!==lastBannerId){lastBannerId=globalEvent.id;var labels={luck2:'Удача X2',luck3:'Удача X3',luck5:'Удача X5',gold:'Золотой',rainbow:'Радужный'};var lab=labels[globalEvent.type]||'Ивент';if(typeof showGlobalBanner==='function')showGlobalBanner((globalEvent.nick||'Игрок')+' купил ивент · '+lab);}})}
-document.querySelectorAll('[data-global-event]').forEach(function(btn){btn.onclick=function(){launchGlobalEvent(btn.getAttribute('data-global-event'))}});
+function listenGlobalEvent(){
+  if(!firebaseReady)return;
+  // Используем прежний узел global/event: так сохраняются существующие Firebase rules.
+  // Каждый тип хранится отдельно: global/event/luck2, global/event/gold и т.д.
+  db.ref('global/event').on('value',function(snap){
+    globalEvent=snap.val()||{};
+    updateBoostsBar();
+    getActiveGlobalEvents().forEach(function(ev){
+      if(ev.id&&ev.id!==lastBannerId){
+        lastBannerId=ev.id;
+        var spec=GLOBAL_EVENT_SPECS[ev.type];
+        if(spec&&typeof showGlobalBanner==='function')showGlobalBanner((ev.nick||'Игрок')+' запустил '+spec.label);
+      }
+    });
+  });
+}
+document.querySelectorAll('[data-global-event]').forEach(function(btn){
+  btn.onclick=function(){launchGlobalEvent(btn.getAttribute('data-global-event'))};
+});
 
 document.querySelectorAll('[data-altar]').forEach(function(btn){
   btn.onclick=function(){
@@ -1957,7 +2018,7 @@ function renderRouletteRows(qty){
   box.innerHTML=html;
 }
 document.getElementById('modal-close').onclick=()=>document.getElementById('case-modal').classList.remove('active');
-(function(){var plus=document.getElementById('qty-plus'),minus=document.getElementById('qty-minus');if(!plus)return;function sync(){document.getElementById('open-qty').textContent=openQty;if(!currentCase)return;var mult=getLuckMult();document.getElementById('btn-open').textContent='Открыть'+(openQty>1?' x'+openQty:'')+' за '+fmt(currentCase.price*openQty)+' 🍯'+(mult>1?' (удача)':'')}plus.onclick=function(){openQty=Math.min(5,openQty+1);sync();if(currentCase&&!spinning)renderRouletteRows(openQty)};minus.onclick=function(){openQty=Math.max(1,openQty-1);sync();if(currentCase&&!spinning)renderRouletteRows(openQty)}})();
+(function(){var plus=document.getElementById('qty-plus'),minus=document.getElementById('qty-minus');if(!plus)return;function sync(){document.getElementById('open-qty').textContent=openQty;if(!currentCase)return;var mult=getLuckMult();document.getElementById('btn-open').textContent='Открыть'+(openQty>1?' x'+openQty:'')+' за '+fmt(currentCase.price*openQty)+' 🍯'+(mult>1?' (удача)':'')}plus.onclick=function(){openQty=Math.min(5,openQty+1);sync();if(currentCase&&!caseSpinning)renderRouletteRows(openQty)};minus.onclick=function(){openQty=Math.max(1,openQty-1);sync();if(currentCase&&!caseSpinning)renderRouletteRows(openQty)}})();
 function rollDrop(drops,luckMult,casePrice){
   function pick(){
     var weighted=drops.map(function(d){
@@ -1997,19 +2058,21 @@ function rollDrop(drops,luckMult,casePrice){
     if(cheap.length)it=cheap[Math.floor(Math.random()*Math.min(5,cheap.length))];
   }
   it=Object.assign({},it);
-  if(globalEvent&&globalEvent.until>Date.now()&&(globalEvent.type==='gold'||globalEvent.type==='rainbow')&&Math.random()<0.22){
-    if(globalEvent.type==='gold'){it.mutation='GOLD';it.price=Math.round(it.price*2)}
+  var mutationEvents=getActiveGlobalEvents().filter(function(ev){return ev.type==='gold'||ev.type==='rainbow'});
+  if(mutationEvents.length&&Math.random()<0.22){
+    var chosenMutation=mutationEvents[Math.floor(Math.random()*mutationEvents.length)];
+    if(chosenMutation.type==='gold'){it.mutation='GOLD';it.price=Math.round(it.price*2)}
     else{it.mutation='RAINBOW';it.price=Math.round(it.price*4)}
   }
   return it;
 }
 document.getElementById('btn-open').onclick=function(){
-  if(spinning||!currentCase)return;
+  if(caseSpinning||!currentCase)return;
   var qty=openQty||1;
   var totalCost=currentCase.price*qty;
   if(user.balance<totalCost){toast('Не хватает мёда','err');playSound('fail');return}
   user.balance-=totalCost;saveUserLocal();updateBalance();
-  spinning=true;
+  caseSpinning=true;
   document.getElementById('btn-open').disabled=true;
   document.getElementById('case-res').innerHTML='';
   var fast=document.getElementById('fast-open')&&document.getElementById('fast-open').checked;
@@ -2017,23 +2080,41 @@ document.getElementById('btn-open').onclick=function(){
   var wins=[];
   for(var i=0;i<qty;i++) wins.push(rollDrop(currentCase.drops,luck,currentCase.price));
 
+  var openFinished=false,openWatchdog=null;
   function finishOpen(){
-    wins.forEach(function(w){user.inventory.push(Object.assign({},w,{uid:uid()}));markDiscovered(w)});
-    user.casesOpened=(user.casesOpened||0)+qty;
-    pushHistory({t:Date.now(),caseName:currentCase.name,caseId:currentCase.id,qty:qty,items:wins.map(function(w){return{id:w.id,name:w.name,emoji:w.emoji,price:w.price,rarity:w.rarity}})});
-    if(typeof bpQuestProgress==='function')bpQuestProgress('cases',qty);
-    saveUserLocal();
-    for(var si=0;si<qty;si++)incrementStat('cases');
-    if(typeof addXp==='function')addXp(qty*((user.workLevel||1)>=8?2:1));
-    playSound('win');
-    var resHtml='<div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-bottom:10px">'+wins.map(function(w){return itemVisual(w,52)}).join('')+'</div>';
-    resHtml+=wins.map(function(w){return '<div style="margin:3px 0"><strong style="color:var(--gold)">'+w.emoji+' '+w.name+'</strong> <span style="color:var(--dim);font-size:.84rem">'+fmt(w.price)+' 🍯</span></div>'}).join('');
-    document.getElementById('case-res').innerHTML=resHtml;
-    document.getElementById('btn-open').style.display='none';
-    spinning=false;
-    toast(qty>1?('Открыто x'+qty+' · разные дропы'):('+ '+wins[0].name));
-    updateBalance();
+    if(openFinished)return;
+    openFinished=true;
+    if(openWatchdog)clearTimeout(openWatchdog);
+    try{
+      wins.forEach(function(w){
+        user.inventory.push(Object.assign({},w,{uid:uid()}));
+        try{markDiscovered(w)}catch(discoveryError){console.warn('markDiscovered failed:',discoveryError)}
+      });
+      user.casesOpened=(user.casesOpened||0)+qty;
+      try{pushHistory({t:Date.now(),caseName:currentCase.name,caseId:currentCase.id,qty:qty,items:wins.map(function(w){return{id:w.id,name:w.name,emoji:w.emoji,price:w.price,rarity:w.rarity}})})}catch(historyError){console.warn('History save failed:',historyError)}
+      try{if(typeof bpQuestProgress==='function')bpQuestProgress('cases',qty)}catch(questError){console.warn('Quest update failed:',questError)}
+      saveUserLocal();
+      try{for(var si=0;si<qty;si++)incrementStat('cases')}catch(statError){console.warn('Stat update failed:',statError)}
+      try{if(typeof addXp==='function')addXp(qty*((user.workLevel||1)>=8?2:1))}catch(xpError){console.warn('XP update failed:',xpError)}
+      playSound('win');
+      var resHtml='<div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-bottom:10px">'+wins.map(function(w){return itemVisual(w,52)}).join('')+'</div>';
+      resHtml+=wins.map(function(w){return '<div style="margin:3px 0"><strong style="color:var(--gold)">'+w.emoji+' '+w.name+'</strong> <span style="color:var(--dim);font-size:.84rem">'+fmt(w.price)+' 🍯</span></div>'}).join('');
+      document.getElementById('case-res').innerHTML=resHtml;
+      document.getElementById('btn-open').style.display='none';
+      toast(qty>1?('Открыто x'+qty+' · разные дропы'):('+ '+wins[0].name));
+    }catch(err){
+      console.error('finishOpen failed:',err);
+      toast('Кейс завершён с ошибкой отображения. Проверь инвентарь.','err');
+      try{document.getElementById('btn-open').style.display='block'}catch(_){}
+    }finally{
+      caseSpinning=false;
+      var openBtn=document.getElementById('btn-open');
+      if(openBtn)openBtn.disabled=false;
+      try{updateBalance()}catch(updateError){console.warn('Balance refresh failed:',updateError)}
+    }
   }
+  // Failsafe: если анимация или callback зависнет, награда всё равно завершится.
+  openWatchdog=setTimeout(function(){if(!openFinished)finishOpen()},15000);
 
   // Always play drop+break animation first
   playCaseOpenAnim(currentCase, function(){
@@ -3418,11 +3499,11 @@ document.getElementById('btn-clear-hist')&&(document.getElementById('btn-clear-h
   if(!user)return;user.history=[];saveUserLocal();renderHistory();playSound('click');toast('История очищена');
 });
 document.getElementById('btn-upg').onclick=function(){
-  if(!selectedFrom.length||!selectedTo||spinning)return;
+  if(!selectedFrom.length||!selectedTo||upgradeSpinning||caseSpinning)return;
   var chance=parseFloat(document.getElementById('btn-upg').dataset.chance);
   if(!chance||chance<=0||getFromTotal()<=0){toast('Выбери чекушки','err');return}
   if((Number(selectedTo.price)||0)>getFromTotal()*20){toast('Максимум x20 от суммы','err');return}
-  spinning=true;document.getElementById('btn-upg').disabled=true;
+  upgradeSpinning=true;document.getElementById('btn-upg').disabled=true;
   var usedUids={};selectedFrom.forEach(function(it){usedUids[it.uid]=(usedUids[it.uid]||0)+1});
   var burned=[];
   var newInv=[];user.inventory.forEach(function(it){if(usedUids[it.uid]>0){usedUids[it.uid]--;burned.push({uid:it.uid,id:it.id,name:it.name,emoji:it.emoji,price:it.price,rarity:it.rarity})}else newInv.push(it)});
@@ -3463,7 +3544,7 @@ document.getElementById('btn-upg').onclick=function(){
     wheel.style.transition='none';wheel.style.transform='rotate(0deg)';
     wheel.style.background='conic-gradient(#1a1610 0deg 360deg)';
     document.querySelectorAll('.mult-btn').forEach(b=>b.classList.remove('active'));
-    spinning=false;renderUpgInv();renderTargets();updateBalance();
+    upgradeSpinning=false;document.getElementById('btn-upg').disabled=false;renderUpgInv();renderTargets();updateBalance();
   }
   if(fast){
     // quick flash
@@ -3556,6 +3637,11 @@ function initContest(){}
 function updateContestUI(){}
 function tickContest(){}
 function resolveContest(){}
+function openCaseToken(item){
+  if(!item||!user)return;
+  // В текущей версии нет описания кейса/награды у жетона; не удаляем предмет и не меняем баланс.
+  toast('Этот жетон пока не настроен. Предмет сохранён.','err');
+}
 function renderInv(){
   var grid=document.getElementById('inv-grid');
   if(!user||!user.inventory)return;
