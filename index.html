@@ -2486,7 +2486,10 @@ function refreshSkinStock(force){
         picked.push({id:s.id, qty:3+Math.floor(Math.random()*5), chance:s.chance});
     });
   }
-  skinStock=picked;
+  skinStock=picked.filter(function(row){
+    var item=getProfileSkin(row.id);
+    return item && Number(item.price)>0 && Number(item.chance||0)>0;
+  });
   try{localStorage.setItem('pchelko_skin_stock_v2',JSON.stringify({until:skinStockUntil,items:skinStock}))}catch(e){}
 }
 function loadSkinStock(){
@@ -2494,7 +2497,11 @@ function loadSkinStock(){
     var d=JSON.parse(localStorage.getItem('pchelko_skin_stock_v2')||'null');
     if(d && d.until>Date.now() && Array.isArray(d.items) && d.items.length){
       skinStockUntil=d.until;
-      skinStock=d.items;
+      // Ignore legacy cached rows for free reward-only skins.
+      skinStock=d.items.filter(function(row){
+        var item=row && getProfileSkin(row.id);
+        return item && Number(item.price)>0 && Number(item.chance||0)>0;
+      });
       return;
     }
   }catch(e){}
@@ -2525,9 +2532,12 @@ function renderSkinStock(){
     if(!Array.isArray(user.skins)) user.skins=['default'];
     if(!skinStock.length) refreshSkinStock(true);
     var tierName={1:'Common',2:'Rare',3:'Legendary'};
-    box.innerHTML=skinStock.map(function(row){
+    box.innerHTML=skinStock.filter(function(row){
+      var item=row && getProfileSkin(row.id);
+      return item && Number(item.price)>0 && Number(item.chance||0)>0;
+    }).map(function(row){
       var s=getProfileSkin(row.id);
-      if(!s) return '';
+      if(!s || Number(s.price)<=0 || Number(s.chance||0)<=0) return '';
       var owned=user.skins.indexOf(s.id)>=0;
       var qty=row.qty|0;
       var out=qty<=0;
@@ -2560,7 +2570,9 @@ function renderSkinStock(){
         e.stopPropagation();
         var sid=btn.getAttribute('data-buy-skin');
         var s=getProfileSkin(sid);
-        if(!s || s.price<=0) return;
+        if(!s || !Number.isFinite(Number(s.price)) || Number(s.price)<=0 || Number(s.chance||0)<=0){
+          toast('Этот скин выдаётся только за награду','err');playSound('fail');return;
+        }
         if(user.skins.indexOf(s.id)>=0){ toast('Уже есть','err'); return; }
         var row=skinStock.find(function(r){return r.id===sid});
         if(!row || row.qty<=0){ toast('Нет в наличии','err'); playSound('fail'); return; }
@@ -2935,13 +2947,20 @@ function renderThemeStock(){
     return;
   }
   var owned=user.profileThemes||[];
-  box.innerHTML=PROFILE_THEMES.slice().sort(function(a,b){return a.price-b.price}).map(function(t){
+  // Reward-only themes (price 0) must never appear in the ticket shop.
+  var purchasableThemes=PROFILE_THEMES.filter(function(t){
+    return t && Number(t.price)>0 && t.id!=='theme_bee';
+  });
+  box.innerHTML=purchasableThemes.slice().sort(function(a,b){return a.price-b.price}).map(function(t){
     var has=owned.indexOf(t.id)>=0;
     var btn=has?'<button type="button" class="gg-buy" disabled>Куплено</button>':'<button type="button" class="gg-buy" data-buy-theme="'+t.id+'">Купить</button>';
     return '<div class="gg-row"><div class="gg-icon">'+t.emoji+'<button type="button" class="loupe" data-prev-theme="'+t.id+'">🔍</button></div><div class="gg-info"><div class="gg-name">'+t.name+'</div><div class="gg-meta">'+(t.desc||'Тема')+'</div><div class="gg-price">'+fmt(t.price)+' 🎫</div></div>'+btn+'</div>';
   }).join('');
   box.querySelectorAll('[data-buy-theme]').forEach(function(b){b.onclick=function(){
     ensureThemeFields();var id=b.getAttribute('data-buy-theme');var t=getProfileTheme(id);
+    if(!t || !Number.isFinite(Number(t.price)) || Number(t.price)<=0 || id==='theme_bee'){
+      toast('Эта тема выдаётся только за награду','err');if(typeof playSound==='function')playSound('fail');return;
+    }
     if((user.profileThemes||[]).indexOf(id)>=0){toast('Уже есть','err');return}
     if((user.tickets||0)<t.price){toast('Нужно '+fmt(t.price)+' 🎫','err');return}
     user.tickets-=t.price;user.profileThemes.push(id);user.profileTheme=id;saveUserLocal();updateBalance();renderThemeStock();toast('Тема: '+t.name);if(typeof syncPublicProfile==='function')syncPublicProfile();
